@@ -5,7 +5,8 @@ import com.codeborne.selenide.Configuration;
 public class DriverConfiguration {
 
     public static void setupDriver() {
-        Configuration.baseUrl = ConfigProvider.TEST_CONFIGURATION.baseUiUrl();
+        boolean isCi = System.getProperty("selenide.remote") != null && !System.getProperty("selenide.remote").isBlank();
+        Configuration.baseUrl = isCi ? "http://espocrm/" : ConfigProvider.TEST_CONFIGURATION.baseUiUrl();
         Configuration.browser = ConfigProvider.TEST_CONFIGURATION.browser();
         Configuration.browserSize = ConfigProvider.TEST_CONFIGURATION.browserSize();
         Configuration.pageLoadTimeout = ConfigProvider.TEST_CONFIGURATION.pageLoadTimeout();

@@ -1,0 +1,170 @@
+# GitLab Runner: Docker Executor
+# Host: Windows + Docker Desktop + WSL 2
+# Окружение (CRM, MariaDB, Selenium) описано в docker-compose.yml
+# Тесты запускаются в стандартном maven-образе, без собственного Dockerfile
+
+stages:
+  - build_app
+  - run_test
+  - result_allure
+  - teardown
+
+variables:
+  COMPOSE_PROJECT_NAME: "crm-ci"
+  DOCKER_HOST: "unix:///var/run/docker.sock"
+  CRM_URL: "http://espocrm/"
+  TEST_IMAGE: "maven:3.9-eclipse-temurin-17"
+  MAVEN_CACHE_VOLUME: "crm-maven-cache"
+
+# ==========================================
+# STAGE 1. BUILD APP
+# ==========================================
+
+build_app:
+  stage: build_app
+  image: docker:27-cli
+  tags:
+    - saas-windows-medium-amd64
+  resource_group: crm_env
+
+  script:
+    - docker version
+
+    # Проверяем конфигурацию Compose
+    - docker compose config -q
+
+    # Удаляем контейнеры и тома предыдущего запуска (чистая CRM и БД)
+    - docker compose down -v --remove-orphans
+
+    # Заранее скачиваем образ для тестов
+    - docker pull "$TEST_IMAGE"
+
+    # Поднимаем CRM, MariaDB и Selenium
+    - docker compose up -d --wait --wait-timeout 300
+
+    # Проверяем доступность CRM из Docker-сети
+    - |
+      docker run --rm \
+        --network crm_ci_net \
+        curlimages/curl:8.11.1 \
+        -fsS --retry 10 --retry-delay 3 \
+        http://espocrm/ -o /dev/null
+
+# ==========================================
+# STAGE 2. RUN TEST
+# ==========================================
+
+run_test:
+  stage: run_test
+  image: docker:27-cli
+  tags:
+    - saas-windows-medium-amd64
+  resource_group: crm_env
+
+  script:
+    - |
+      set -eu
+
+      TEST_CONTAINER="crm-test-${CI_JOB_ID}"
+
+      # Создаём контейнер с тестами из готового maven-образа.
+      # Именованный том кэширует зависимости Maven между запусками.
+      docker create \
+        --name "$TEST_CONTAINER" \
+        --network crm_ci_net \
+        --workdir /workspace \
+        -v "${MAVEN_CACHE_VOLUME}:/root/.m2" \
+        "$TEST_IMAGE" \
+        mvn -B -ntp test \
+        "-DbaseUiUrl=${CRM_URL}" \
+        "-DcrmApiUrl=${CRM_URL}" \
+        "-DdbUrl=jdbc:mariadb://espocrm-db:3306/espocrm" \
+        "-Dselenide.remote=http://selenium:4444/wd/hub" \
+        "-Dheadless=true" \
+        '-Dtest=api.tests.CrmTest,ui.tests.*Test'
+
+      # Копируем исходники проекта из GitLab Job внутрь контейнера
+      # (bind-mount не работает: Docker-демон на хосте не видит /builds/...)
+      docker cp ./. "$TEST_CONTAINER:/workspace/"
+
+      # Запускаем тесты
+      docker start -a "$TEST_CONTAINER" || true
+
+      # Получаем настоящий код завершения тестов
+      EXIT_CODE=$(docker inspect \
+        --format '{{.State.ExitCode}}' "$TEST_CONTAINER")
+
+      echo "Tests exit code: $EXIT_CODE"
+
+      # Копируем результаты обратно в GitLab Job
+      mkdir -p target
+
+      docker cp \
+        "$TEST_CONTAINER:/workspace/target/." \
+        target/ || true
+
+      # Удаляем временный тестовый контейнер
+      docker rm -f "$TEST_CONTAINER"
+
+      # Передаём результат Maven в GitLab
+      exit "$EXIT_CODE"
+
+  artifacts:
+    when: always
+    paths:
+      - target/allure-results/
+      - target/surefire-reports/
+      - target/downloads/
+    reports:
+      junit: target/surefire-reports/TEST-*.xml
+    expire_in: 7 days
+
+# ==========================================
+# STAGE 3. RESULT ALLURE
+# ==========================================
+
+result_allure:
+  stage: result_allure
+  image: node:22-bookworm-slim
+  tags:
+    - saas-windows-medium-amd64
+
+  dependencies:
+    - run_test
+
+  when: always
+
+  script:
+    # Allure CLI 2 требует Java
+    - apt-get update
+    - apt-get install -y --no-install-recommends default-jre-headless
+
+    # Устанавливаем Allure CLI
+    - npm install -g allure-commandline@2.35.1
+
+    # Генерируем HTML-отчёт
+    - mkdir -p target/allure-results
+    - allure generate target/allure-results --clean -o allure-report
+
+  artifacts:
+    when: always
+    paths:
+      - allure-report/
+      - target/allure-results/
+    expire_in: 14 days
+
+# ==========================================
+# STAGE 4. TEARDOWN
+# ==========================================
+
+teardown:
+  stage: teardown
+  image: docker:27-cli
+  tags:
+    - saas-windows-medium-amd64
+  resource_group: crm_env
+  when: always
+  dependencies: [ ]
+
+  script:
+    - docker compose down -v --remove-orphans

@@ -1,0 +1,90 @@
+name: crm-ci
+
+services:
+  espocrm-db:
+    image: mariadb:11.4
+    container_name: espocrm-db
+    environment:
+      MARIADB_ROOT_PASSWORD: root_password
+      MARIADB_DATABASE: espocrm
+      MARIADB_USER: espocrm
+      MARIADB_PASSWORD: database_password
+    volumes:
+      - espocrm-db:/var/lib/mysql
+    healthcheck:
+      test: [ "CMD", "healthcheck.sh", "--connect", "--innodb_initialized" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - espocrm_net
+
+  espocrm:
+    image: espocrm/espocrm:8.4.2
+    container_name: espocrm
+    depends_on:
+      espocrm-db:
+        condition: service_healthy
+    environment:
+      ESPOCRM_DATABASE_PLATFORM: Mysql
+      ESPOCRM_DATABASE_HOST: espocrm-db
+      ESPOCRM_DATABASE_NAME: espocrm
+      ESPOCRM_DATABASE_USER: espocrm
+      ESPOCRM_DATABASE_PASSWORD: database_password
+      ESPOCRM_ADMIN_USERNAME: admin
+      ESPOCRM_ADMIN_PASSWORD: admin
+      ESPOCRM_SITE_URL: http://espocrm
+      ESPOCRM_CONFIG_USE_WEB_SOCKET: "false"
+    # Порты наружу в CI не нужны: всё общается внутри сети crm_ci_net.
+    # Для локальной отладки раскомментируйте:
+    # ports:
+    #   - "8080:80"
+    volumes:
+      - espocrm:/var/www/html
+    healthcheck:
+      test: [ "CMD", "curl", "-fsS", "http://127.0.0.1/" ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks:
+      - espocrm_net
+
+  espocrm-daemon:
+    image: espocrm/espocrm:8.4.2
+    container_name: espocrm-daemon
+    depends_on:
+      espocrm:
+        condition: service_healthy
+    entrypoint: docker-daemon.sh
+    volumes:
+      - espocrm:/var/www/html
+    networks:
+      - espocrm_net
+
+  selenium:
+    image: selenium/standalone-chrome:4.35.0
+    container_name: selenium
+    shm_size: 2gb
+    environment:
+      SE_NODE_MAX_SESSIONS: "1"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl -fsS http://localhost:4444/status | grep -Eq ''"ready"[[:space:]]*:[[:space:]]*true'''
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    networks:
+      - espocrm_net
+
+volumes:
+  espocrm-db:
+  espocrm:
+
+networks:
+  espocrm_net:
+    name: crm_ci_net
+    driver: bridge

@@ -1,0 +1,242 @@
+name: CRM CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+# Не допускаем одновременной работы с одним Docker-окружением
+concurrency:
+  group: crm_env
+  cancel-in-progress: false
+
+env:
+  COMPOSE_PROJECT_NAME: crm-ci
+  CRM_URL: http://espocrm/
+  TEST_IMAGE: maven:3.9-eclipse-temurin-17
+  MAVEN_CACHE_VOLUME: crm-maven-cache
+
+jobs:
+  crm_pipeline:
+    name: CRM Build, Tests, Allure, Teardown
+
+    # Локальный GitHub Runner на Windows
+    runs-on: [ self-hosted, Windows, X64 ]
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+
+      # ==========================================
+      # CHECKOUT
+      # ==========================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ==========================================
+      # STAGE 1. BUILD APP
+      # ==========================================
+
+      - name: Build App - Check Docker
+        run: |
+          docker version
+          docker compose version
+
+      - name: Build App - Validate Compose
+        run: |
+          docker compose config -q
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Build App - Remove old environment
+        run: |
+          docker compose down -v --remove-orphans
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Build App - Pull Maven image
+        run: |
+          docker pull $env:TEST_IMAGE
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Build App - Start CRM, MariaDB, Selenium
+        run: |
+          docker compose up -d --wait --wait-timeout 300
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Build App - Check CRM availability
+        run: |
+          docker run --rm `
+            --network crm_ci_net `
+            curlimages/curl:8.11.1 `
+            -fsS --retry 10 --retry-delay 3 `
+            http://espocrm/ -o /dev/null
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      # ==========================================
+      # STAGE 2. RUN TEST
+      # ==========================================
+
+      - name: Run Test - Execute Maven tests
+        id: run_tests
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $testContainer = "crm-test-${{ github.run_id }}-${{ github.run_attempt }}"
+
+          # Создаём контейнер из готового Maven-образа.
+          # Именованный том сохраняет Maven-зависимости.
+          $dockerArgs = @(
+            "create"
+            "--name", $testContainer
+            "--network", "crm_ci_net"
+            "--workdir", "/workspace"
+            "-v", "${env:MAVEN_CACHE_VOLUME}:/root/.m2"
+            $env:TEST_IMAGE
+            "mvn", "-B", "-ntp", "test"
+            "-DbaseUiUrl=$env:CRM_URL"
+            "-DcrmApiUrl=$env:CRM_URL"
+            "-DdbUrl=jdbc:mariadb://espocrm-db:3306/espocrm"
+            "-Dselenide.remote=http://selenium:4444/wd/hub"
+            "-Dheadless=true"
+            '-Dtest=api.tests.CrmTest,ui.tests.*Test'
+          )
+
+          & docker @dockerArgs
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          try {
+            # Копируем исходники проекта в контейнер
+            docker cp ./. "${testContainer}:/workspace/"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to copy project into container"
+            }
+
+            # Запускаем Maven-тесты
+            docker start -a $testContainer
+
+            # Получаем реальный код завершения Maven
+            $exitCode = docker inspect `
+              --format '{{.State.ExitCode}}' `
+              $testContainer
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to inspect test container"
+            }
+
+            Write-Host "Tests exit code: $exitCode"
+
+            # Копируем результаты обратно
+            New-Item -ItemType Directory `
+              -Force -Path target | Out-Null
+
+            docker cp `
+              "${testContainer}:/workspace/target/." `
+              "target/"
+
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "Unable to copy test results"
+            }
+
+            # Возвращаем результат выполнения Maven
+            exit ([int]$exitCode)
+          }
+          finally {
+            # Удаляем временный тестовый контейнер
+            docker rm -f $testContainer
+          }
+
+      # ==========================================
+      # STAGE 2. TEST ARTIFACTS
+      # ==========================================
+
+      - name: Upload JUnit and test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crm-test-results
+          path: |
+            target/allure-results/
+            target/surefire-reports/
+            target/downloads/
+          retention-days: 7
+          if-no-files-found: warn
+
+      # ==========================================
+      # STAGE 3. RESULT ALLURE
+      # ==========================================
+
+      - name: Allure - Setup Java 17
+        if: always()
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Allure - Setup Node.js 22
+        if: always()
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Allure - Install CLI
+        if: always()
+        run: |
+          npm install -g allure-commandline@2.35.1
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Allure - Generate HTML report
+        if: always()
+        run: |
+          New-Item -ItemType Directory `
+            -Force -Path target/allure-results | Out-Null
+
+          allure generate target/allure-results `
+            --clean `
+            -o allure-report
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload Allure Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crm-allure-report
+          path: |
+            allure-report/
+            target/allure-results/
+          retention-days: 14
+          if-no-files-found: warn
+
+      # ==========================================
+      # STAGE 4. TEARDOWN
+      # ==========================================
+
+      - name: Teardown - Remove CRM environment
+        if: always()
+        run: |
+          docker compose down -v --remove-orphans
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }

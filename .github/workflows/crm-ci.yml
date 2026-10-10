@@ -22,10 +22,7 @@ env:
 jobs:
   crm_pipeline:
     name: CRM Build, Tests, Allure, Teardown
-
-    # Локальный GitHub Runner на Windows
-    runs-on: [ self-hosted, Windows, X64 ]
-
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: pwsh

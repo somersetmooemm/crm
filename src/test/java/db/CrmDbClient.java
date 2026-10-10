@@ -13,9 +13,13 @@ import static api.contollers.AuthApiController.createApiUserAndGetKey;
 public class CrmDbClient {
 
     public static Connection getConnection() throws SQLException {
-        return DriverManager.getConnection(ConfigProvider.TEST_CONFIGURATION_DB.dbUrl(),
+        String dbUrl = System.getProperty("dbUrl", ConfigProvider.TEST_CONFIGURATION_DB.dbUrl());
+        log.info("Connecting to database: {}", dbUrl);
+        return DriverManager.getConnection(
+                dbUrl,
                 ConfigProvider.TEST_CONFIGURATION_DB.dbUser(),
-                ConfigProvider.TEST_CONFIGURATION_DB.dbPassword());
+                ConfigProvider.TEST_CONFIGURATION_DB.dbPassword()
+        );
     }
 
     @Step("Получение API юзера из БД")

@@ -1,5 +1,10 @@
 name: CRM CI
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 on:
   push:
     branches:
@@ -225,6 +230,17 @@ jobs:
             target/allure-results/
           retention-days: 14
           if-no-files-found: warn
+
+      - name: Upload Allure to GitHub Pages
+        if: always() && hashFiles('allure-report/index.html') != ''
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: allure-report/
+
+      - name: Deploy Allure to GitHub Pages
+        id: deployment
+        if: always() && hashFiles('allure-report/index.html') != ''
+        uses: actions/deploy-pages@v4
 
       # ==========================================
       # STAGE 4. TEARDOWN

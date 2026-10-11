@@ -11,7 +11,6 @@ public class ApiSpec {
 
     public static RequestSpecification authApi() {
         return new RequestSpecBuilder()
-                .setBaseUri(ConfigProvider.TEST_CONFIGURATION.crmApiUrl())
                 .addHeader("X-Api-Key", CrmDbClient.getApiKeyFromDb().getApiKey())
                 .setContentType(ContentType.JSON)
                 .build();
@@ -19,7 +18,6 @@ public class ApiSpec {
 
     public static RequestSpecification authAdmin() {
         return new RequestSpecBuilder()
-                .setBaseUri(ConfigProvider.TEST_CONFIGURATION.crmApiUrl())
                 .setContentType(ContentType.JSON)
                 .setAuth(RestAssured.preemptive().basic(
                         ConfigProvider.TEST_CONFIGURATION.authLogin(),

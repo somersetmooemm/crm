@@ -1,21 +1,190 @@
-name: Hello-World #Название
+name: CRM CI
 
-#Событие на которое запускается пайплайн
 on:
   push:
     branches:
       - main
-
+  pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Keep CRM runs from overlapping.
+concurrency:
+  group: crm-env-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  COMPOSE_PROJECT_NAME: crm-ci
+  CRM_URL: http://espocrm/
+  TEST_IMAGE: maven:3.9-eclipse-temurin-17
+  MAVEN_CACHE_VOLUME: crm-maven-cache
+
 jobs:
-  hello:
-    name: Hello job
+  crm_pipeline:
+    name: CRM Build, Tests, Allure, Teardown
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    defaults:
+      run:
+        shell: bash
+
     steps:
-      - name: Step 1 - Run echo
-        run: echo "Hello World"
-      - name: Step 2 - Github info
-        run: echo "Branch - $GITHUB_REF_NAME"
-      - name: Step 3 - Finish
-        run: echo "Pipeline finish"
+      # ==========================================
+      # CHECKOUT
+      # ==========================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ==========================================
+      # STAGE 1. BUILD APP
+      # ==========================================
+      - name: Build App - Check Docker
+        run: |
+          docker version
+          docker compose version
+
+      - name: Build App - Validate Compose
+        run: docker compose config -q
+
+      - name: Build App - Remove old environment
+        run: docker compose down -v --remove-orphans
+
+      - name: Build App - Pull Maven image
+        run: docker pull "$TEST_IMAGE"
+
+      - name: Build App - Start CRM, MariaDB, Selenium
+        run: docker compose up -d --wait --wait-timeout 300
+
+      - name: Build App - Check CRM availability
+        run: |
+          docker run --rm \
+            --network crm_ci_net \
+            curlimages/curl:8.11.1 \
+            -fsS --retry 10 --retry-delay 3 \
+            http://espocrm/ -o /dev/null
+
+      # ==========================================
+      # STAGE 2. RUN TEST
+      # ==========================================
+      - name: Run Test - Execute Maven tests
+        id: run_tests
+        run: |
+          set -euo pipefail
+          TEST_CONTAINER="crm-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          cleanup_test_container() {
+            docker rm -f "$TEST_CONTAINER" >/dev/null 2>&1 || true
+          }
+          trap cleanup_test_container EXIT
+
+          # A named volume is Maven's repository within this runner.
+          docker create \
+            --name "$TEST_CONTAINER" \
+            --network crm_ci_net \
+            --workdir /workspace \
+            -v "${MAVEN_CACHE_VOLUME}:/root/.m2" \
+            "$TEST_IMAGE" \
+            mvn -B -ntp test \
+            "-DbaseUiUrl=${CRM_URL}" \
+            "-DcrmApiUrl=${CRM_URL}" \
+            "-DdbUrl=jdbc:mariadb://espocrm-db:3306/espocrm" \
+            "-Dselenide.remote=http://selenium:4444/wd/hub"
+
+          # Copy repository contents to /workspace inside the test container.
+          docker cp ./. "$TEST_CONTAINER:/workspace/"
+
+          # Docker start -a may return a nonzero code. Preserve the test output.
+          docker start -a "$TEST_CONTAINER" || true
+          EXIT_CODE="$(docker inspect --format '{{.State.ExitCode}}' "$TEST_CONTAINER")"
+          echo "Tests exit code: $EXIT_CODE"
+
+          mkdir -p target
+          if ! docker cp "$TEST_CONTAINER:/workspace/target/." target/; then
+            echo 'Warning: no test target directory available to copy' >&2
+          fi
+
+          exit "$EXIT_CODE"
+
+      # ==========================================
+      # STAGE 2. TEST ARTIFACTS
+      # ==========================================
+      - name: Upload JUnit and test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crm-test-results
+          path: |
+            target/allure-results/
+            target/surefire-reports/
+            target/downloads/
+          retention-days: 7
+          if-no-files-found: warn
+
+      # ==========================================
+      # STAGE 3. RESULT ALLURE
+      # ==========================================
+      - name: Allure - Setup Java 17
+        if: always()
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Allure - Setup Node.js 22
+        if: always()
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Allure - Install CLI
+        if: always()
+        run: npm install -g allure-commandline@2.35.1
+
+      - name: Allure - Generate HTML report
+        if: always()
+        run: |
+          mkdir -p target/allure-results
+          allure generate target/allure-results --clean -o allure-report
+
+      - name: Upload Allure Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crm-allure-report
+          path: |
+            allure-report/
+            target/allure-results/
+          retention-days: 14
+          if-no-files-found: warn
+
+      # Publish only for trusted pushes/manual runs on main.
+      - name: Upload Allure to GitHub Pages
+        id: pages_artifact
+        if: >-
+          always() &&
+          github.event_name != 'pull_request' &&
+          github.ref == 'refs/heads/main' &&
+          hashFiles('allure-report/index.html') != ''
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: allure-report/
+
+      - name: Deploy Allure to GitHub Pages
+        id: deployment
+        if: >-
+          always() &&
+          steps.pages_artifact.outcome == 'success'
+        uses: actions/deploy-pages@v4
+
+      # ==========================================
+      # STAGE 4. TEARDOWN
+      # ==========================================
+      - name: Teardown - Remove CRM environment
+        if: always()
+        run: docker compose down -v --remove-orphans

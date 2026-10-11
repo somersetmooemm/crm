@@ -6,7 +6,7 @@ import org.openqa.selenium.chrome.ChromeOptions;
 public class DriverConfiguration {
 
     public static void setupDriver() {
-        boolean isCi = System.getProperty("os.name").toLowerCase().contains("linux");
+        boolean isCi = System.getProperty("selenide.remote") != null;
 
         Configuration.baseUrl = isCi ? "http://espocrm/" : ConfigProvider.TEST_CONFIGURATION.baseUiUrl();
         Configuration.browser = ConfigProvider.TEST_CONFIGURATION.browser();

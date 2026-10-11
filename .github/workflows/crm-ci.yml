@@ -95,9 +95,7 @@ jobs:
             "-DbaseUiUrl=${CRM_URL}" \
             "-DcrmApiUrl=${CRM_URL}" \
             "-DdbUrl=jdbc:mariadb://espocrm-db:3306/espocrm" \
-            "-Dselenide.remote=http://selenium:4444/wd/hub" \
-            "-Dheadless=true" \
-            '-Dtest=api.tests.CrmTest,ui.tests.*Test'
+            "-Dselenide.remote=http://selenium:4444/wd/hub"
 
           # Copy repository contents to /workspace inside the test container.
           docker cp ./. "$TEST_CONTAINER:/workspace/"

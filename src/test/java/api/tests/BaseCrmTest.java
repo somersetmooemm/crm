@@ -16,7 +16,8 @@ public abstract class BaseCrmTest {
     @BeforeAll
     public static void setup() {
         log.info("Инициализация тестового окружения");
-        RestAssured.baseURI = ConfigProvider.TEST_CONFIGURATION.crmApiUrl();
+        boolean isCi = System.getProperty("os.name").toLowerCase().contains("linux");
+        RestAssured.baseURI = isCi ? "http://espocrm/" : ConfigProvider.TEST_CONFIGURATION.crmApiUrl();
         RestAssured.filters(CustomTpl.customLogFilter().getFilter());
         RestAssured.enableLoggingOfRequestAndResponseIfValidationFails();
     }
